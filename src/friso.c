@@ -4,13 +4,14 @@
  * 
  * @author	chenxin <chenxin619315@gmail.com>
  */
-#include "friso_API.h"
-#include "friso.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#include "friso_API.h"
+#include "friso_ctype.h"
+#include "friso.h"
 
 /* {{{ create a new friso configuration variable.
 */
@@ -22,6 +23,12 @@ FRISO_API friso_t friso_new( void )
     } 
 
     e->dic	= NULL;
+    e->charset	= FRISO_UTF8;	//set default charset UTF8.
+
+    //invoke the friso_keep_punctuation. 
+    //	(or, it may cause thread problem)
+    utf8_keep_punctuation( "#" );
+    gbk_keep_punctuation ( "#" );
 
     return e;
 }
@@ -30,7 +37,7 @@ FRISO_API friso_t friso_new( void )
 /* {{{ creat a new friso with initialize item from a configuration file.
  * 
  * @return 1 for successfully and 0 for failed.
-*/
+ */
 FRISO_API int friso_init_from_ifile( 
 	friso_t friso, friso_config_t config, fstring __ifile ) 
 {
@@ -107,6 +114,8 @@ FRISO_API int friso_init_from_ifile(
 		config->nthreshold = atoi( __line__ );
 	    } else if ( strcmp( __key__, "friso.mode" ) == 0 ) {
 		config->mode = ( friso_mode_t ) atoi( __line__ );
+	    } else if ( strcmp( __key__, "friso.charset" ) == 0 ) {
+		friso->charset = (friso_charset_t) atoi( __line__ );
 	    }
 	}
 
@@ -118,7 +127,9 @@ FRISO_API int friso_init_from_ifile(
 	if ( __hit__ != 0 ) 
 	{
 	    friso->dic = friso_dic_new();
-	    friso_dic_load_from_ifile( friso, config, __lexi__, config->max_len * 3 );
+	    //add charset check.
+	    friso_dic_load_from_ifile( friso, config, 
+		    __lexi__, config->max_len * (friso->charset == FRISO_UTF8 ? 3 : 2) );
 	}
 
 	fclose( __stream );
@@ -136,7 +147,7 @@ FRISO_API void friso_free( friso_t friso )
 {
     //free the dictionary
     if ( friso->dic != NULL ) {
-		friso_dic_free( friso->dic );
+	friso_dic_free( friso->dic );
     }
     FRISO_FREE( friso );
 }
@@ -151,7 +162,7 @@ FRISO_API friso_config_t friso_new_config( void )
     if ( cfg == NULL ) {
 	___ALLOCATION_ERROR___;
     }
-    
+
     //initialize the configuration entry.
     friso_init_config(cfg);
 
@@ -250,29 +261,24 @@ FRISO_API void friso_set_text(
  * the static functions:										*
  * 		to assist the friso_next finish the work.				*
  ****************************************************************/
-/* {{{ read the next word from the current position.*/
-__STATIC_API__ uint_t read_next_word( 
-	friso_task_t task, 
-	uint_t * idx, 
-	fstring __word ) 
+/* {{{ read the next word from the current position.
+ * 
+ * @return	int the bytes of the readed word.
+ */
+__STATIC_API__ uint_t readNextWord( 
+	friso_t friso,			//friso instance
+	friso_task_t task, 		//token task
+	uint_t *idx, 			//current index.
+	fstring __word ) 		//work buffer.
 {
-    if ( *idx >= task->length ) return 0;
+    if ( friso->charset == FRISO_UTF8 )
+	//@reader: task->unicode = get_utf8_unicode(task->buffer) is moved insite
+	//	function utf8_next_word from friso 1.6.0 .
+	return utf8_next_word( task, idx, __word );
+    else if ( friso->charset == FRISO_GBK )
+	return gbk_next_word( task, idx, __word );
 
-    //register uint_t t;
-    task->bytes = get_utf8_bytes( task->text[ *idx ] );
-
-    //for ( t = 0; t < task->bytes; t++ ) {
-    //	__word[t] = task->text[ (*idx)++ ];
-    //}
-
-    //change the loop to memcpy.
-    //it is more efficient.
-    //@date 2013-09-04
-    memcpy(__word, task->text + (*idx), task->bytes);
-    (*idx) += task->bytes;
-    __word[task->bytes] = '\0';
-
-    return task->bytes;
+    return 0;		//unknow charset.
 }
 /* }}} */
 
@@ -284,8 +290,7 @@ __STATIC_API__ lex_entry_t next_simple_cjk(
 	friso_task_t task ) 
 {
     uint_t t, idx = task->idx, __length__;
-    string_buffer_t sb = 
-	new_string_buffer_with_string( task->buffer );
+    string_buffer_t sb = new_string_buffer_with_string( task->buffer );
     lex_entry_t e = friso_dic_get( friso->dic, 
 	    __LEX_CJK_WORDS__, sb->buffer );
 
@@ -297,13 +302,11 @@ __STATIC_API__ lex_entry_t next_simple_cjk(
     __length__ = e->length;
 
     for ( t = 1; t < config->max_len 
-	    && ( task->bytes = read_next_word( 
-		    task, &idx, task->buffer ) ) != 0; t++ ) 
+	    && ( task->bytes = readNextWord( 
+		    friso, task, &idx, task->buffer ) ) != 0; t++ ) 
     {
-	task->unicode = get_utf8_unicode( task->buffer );
-
-	if ( utf8_whitespace( task->unicode ) ) break;
-	if ( ! utf8_cjk_string( task->unicode ) ) break;
+	if ( friso_whitespace( friso->charset, task ) ) break;
+	if ( ! friso_cn_string( friso->charset, task ) ) break;
 
 	string_buffer_append( sb, task->buffer );
 
@@ -336,21 +339,36 @@ __STATIC_API__ lex_entry_t next_simple_cjk(
 
 /* {{{ basic latin segment*/
 //basic latin full-width change and upper lower case change quick accessor.
-#define ___LATAIN_FULL_UPPER_CHECK___				\
-    if ( utf8_fullwidth_en_char( task->unicode ) ) {	\
-	task->unicode -= 65248;					\
-	__convert = 1;						\
-	memset( task->buffer, 0, 7 );				\
-    }								\
-if ( utf8_uppercase_letter( task->unicode ) ) {		\
-    /*reset the buffer*/					\
-    task->unicode += 32;					\
-    __convert = 1;						\
-}								\
-if ( __convert == 1 ) {					\
-    unicode_to_utf8( task->unicode, task->buffer );		\
-    __convert = 0;											\
-}	
+#define latin_full_upper_convert( friso, task, convert ) \
+do {\
+	/*convert full-width char  to half-width*/ 		\
+	if ( friso_fullwidth_en_char( friso->charset, task ) ) {	\
+		if ( friso->charset == FRISO_UTF8 ) 		\
+			task->unicode -= 65248;					\
+		else if ( friso->charset == FRISO_GBK ) 	\
+		{\
+			task->buffer[0] = ((uchar_t)task->buffer[1]) - 128;	\
+			task->buffer[1] = '\0';					\
+		}\
+		convert = 1;								\
+	}												\
+	/*convert uppercase char to lowercase char*/ 	\
+	if ( friso_uppercase_letter( friso->charset, task ) ) {		\
+		if ( friso->charset == FRISO_UTF8 )			\
+			task->unicode += 32;					\
+		/*With the above logic, 					
+		 * here we just need to check half-width*/	\
+		else if ( friso->charset == FRISO_GBK )		\
+			task->buffer[0] = task->buffer[0] + 32;	\
+		convert = 1;								\
+	}												\
+	/* convert the unicode to utf-8 bytes. (FRISO_UTF8) */		\
+	if ( convert == 1 && friso->charset == FRISO_UTF8 ) {		\
+		memset( task->buffer, 0x00, 7 );						\
+		unicode_to_utf8( task->unicode, task->buffer );			\
+		convert = 0;											\
+	} \
+} while ( 0 )
 
 
 //get the next latin word from the current position.
@@ -365,39 +383,41 @@ __STATIC_API__ lex_entry_t next_basic_latin(
     lex_entry_t e = NULL;
 
     //full-half width and upper-lower case exchange.
-    task->unicode = get_utf8_unicode( task->buffer );
-    ___LATAIN_FULL_UPPER_CHECK___;
+    latin_full_upper_convert( friso, task, __convert );
 
     //creat a new fstring buffer and append the task->buffer insite.
     sb = new_string_buffer_with_string( task->buffer );
 
     //segmentation.
-    while ( ( task->bytes = read_next_word( 
-		    task, &task->idx, task->buffer ) ) != 0 ) 
+    while ( ( task->bytes = readNextWord( 
+		    friso, task, &task->idx, task->buffer ) ) != 0 ) 
     {
-	task->unicode = get_utf8_unicode( task->buffer );
-
-	if ( utf8_whitespace( task->unicode ) ) {
+	//check if it is a whitespace.
+	if ( friso_whitespace( friso->charset, task ) ) {
 	    wspace = 1;
 	    break;
 	}
-	if ( utf8_en_punctuation( task->unicode ) 
-		&& ! utf8_keep_punctuation( task->buffer ) ) 
+
+	//punctuation check.
+	if ( friso_en_punctuation( friso->charset, task ) 
+		&& ! friso_keep_punctuation( friso->charset, task ) ) 
 	{
 	    //Keep the punctuation. (added 2013-08-31)
 	    task->idx -= task->bytes;
 	    break;
 	}	
-	if ( ! ( utf8_halfwidth_en_char( task->unicode ) 
-		    || utf8_fullwidth_en_char( task->unicode ) ) ) 
+
+	//check if it english char.
+	if ( ! ( friso_halfwidth_en_char( friso->charset, task ) 
+		    || friso_fullwidth_en_char( friso->charset, task ) ) ) 
 	{
 	    task->idx -= task->bytes;
-	    if ( utf8_cjk_string( task->unicode ) ) chkecm = 1;
+	    if ( friso_cn_string( friso->charset, task ) ) chkecm = 1;
 	    break;
 	}
 
 	//full-half width and upper-lower case convert
-	___LATAIN_FULL_UPPER_CHECK___;
+	latin_full_upper_convert( friso, task, __convert );
 
 	//append the word the buffer.
 	string_buffer_append( sb, task->buffer );
@@ -412,7 +432,8 @@ __STATIC_API__ lex_entry_t next_basic_latin(
      */
     for ( ; sb->length > 0 
 	    && sb->buffer[ sb->length - 1 ] != '%' 
-	    && is_en_punctuation( sb->buffer[ sb->length - 1 ] ); ) 
+	    && is_en_punctuation( 
+		friso->charset, sb->buffer[ sb->length - 1 ] ); ) 
     {
 	//check the english punctuation mixed word.
 	if ( friso_dic_match( friso->dic, 
@@ -445,11 +466,11 @@ __STATIC_API__ lex_entry_t next_basic_latin(
 	 * @date 2013-10-14
 	 */
 	if ( chkunits 
-		&& ( utf8_numeric_string(sb->buffer) 
-		    || utf8_decimal_string(sb->buffer) ) ) 
+		&& ( friso_numeric_string( friso->charset, sb->buffer ) 
+		    || friso_decimal_string( friso->charset, sb->buffer ) ) ) 
 	{
-	    if ( ( task->bytes = read_next_word(
-			    task, &task->idx, task->buffer ) ) != 0 ) 
+	    if ( ( task->bytes = readNextWord(
+			    friso, task, &task->idx, task->buffer ) ) != 0 ) 
 	    {
 		//check the EC dictionary.
 		if ( friso_dic_match( friso->dic, 
@@ -471,12 +492,10 @@ __STATIC_API__ lex_entry_t next_basic_latin(
     //Try to find a english chinese mixed word.
     tmp = new_string_buffer_with_string( sb->buffer );
     for ( t = 0; t < config->mix_len 
-	    && ( task->bytes = read_next_word( 
-		    task, &task->idx, task->buffer ) ) != 0; t++ ) 
+	    && ( task->bytes = readNextWord( 
+		    friso, task, &task->idx, task->buffer ) ) != 0; t++ ) 
     {
-	task->unicode = get_utf8_unicode( task->buffer );
-
-	//if ( ! utf8_cjk_string( task->unicode ) ) {
+	//if ( ! friso_cn_string( friso->charset, task ) ) {
 	//	task->idx -= task->bytes;
 	//	break;
 	//}
@@ -484,7 +503,7 @@ __STATIC_API__ lex_entry_t next_basic_latin(
 	//more complex mixed words could be find here. 
 	// (no only english and chinese mix word)
 	//@date 2013-10-14
-	if ( utf8_whitespace( task->unicode ) ) {
+	if ( friso_whitespace( friso->charset, task ) ) {
 	    /*
 	     * the plus 1 for task->idx here
 	     * 	cause it will cause the task->idx dislocation.
@@ -515,10 +534,11 @@ __STATIC_API__ lex_entry_t next_basic_latin(
 
     //no match for mix word, try to find a single unit.
     if ( chkunits 
-	    && ( utf8_numeric_string(sb->buffer) 
-		|| utf8_decimal_string(sb->buffer) ) ) {
-	if ( ( task->bytes = read_next_word( 
-			task, &task->idx, task->buffer ) ) != 0 ) {
+	    && ( friso_numeric_string( friso->charset, sb->buffer ) 
+		|| friso_decimal_string( friso->charset, sb->buffer ) ) ) 
+    {
+	if ( ( task->bytes = readNextWord( 
+			friso, task, &task->idx, task->buffer ) ) != 0 ) {
 	    //check the single chinese units dictionary.
 	    if ( friso_dic_match( friso->dic, 
 			__LEX_CJK_UNITS__, task->buffer ) )
@@ -537,7 +557,7 @@ __STATIC_API__ lex_entry_t next_basic_latin(
 /* }}} */
 
 /* **************************************************************
- * 	mmseg algorithm implemented functions :: start  			*
+ * 	mmseg algorithm implemented functions :: start  	*
  ****************************************************************/
 
 /* {{{ get the next match from the current position,
@@ -558,16 +578,14 @@ __STATIC_API__ friso_array_t get_next_match(
     //create a match dynamic array.
     friso_array_t match = 
 	new_array_list_with_opacity( config->max_len );
-    array_list_add( match, 
-	    friso_dic_get( friso->dic, 
-		__LEX_CJK_WORDS__, task->buffer ) );
+    array_list_add( match, friso_dic_get( 
+		friso->dic, __LEX_CJK_WORDS__, task->buffer ) );
 
     for ( t = 1; t < config->max_len && ( task->bytes = 
-		read_next_word( task, &idx, task->buffer ) ) != 0;
-	    t++ )  {
-	task->unicode = get_utf8_unicode( task->buffer );
-	if ( utf8_whitespace( task->unicode ) )	break;
-	if ( ! utf8_cjk_string( task->unicode ) ) break;
+		readNextWord( friso, task, &idx, task->buffer ) ) != 0; t++ )  
+    {
+	if ( friso_whitespace( friso->charset, task ) )	break;
+	if ( ! friso_cn_string( friso->charset, task ) ) break;
 
 	//append the task->buffer to the buffer.
 	string_buffer_append( sb, task->buffer );
@@ -587,9 +605,8 @@ __STATIC_API__ friso_array_t get_next_match(
 	     *			the newly created lex_entry_cdt.
 	     *		2.more efficient of course.
 	     */
-	    array_list_add( match, 
-		    friso_dic_get( friso->dic, 
-			__LEX_CJK_WORDS__, sb->buffer ) );
+	    array_list_add( match, friso_dic_get( 
+			friso->dic, __LEX_CJK_WORDS__, sb->buffer ) );
 	}
     }
 
@@ -880,8 +897,8 @@ __STATIC_API__ lex_entry_t next_complex_cjk(
     lex_entry_t fe, se, te;
     friso_chunk_t e;
     friso_array_t words, chunks;
-    friso_array_t smatch, tmatch, 
-		  fmatch = get_next_match( friso, config, task, task->idx );
+    friso_array_t smatch, tmatch, fmatch = 
+	get_next_match( friso, config, task, task->idx );
 
     /*
      * here:
@@ -915,10 +932,10 @@ __STATIC_API__ lex_entry_t next_complex_cjk(
 	/*get the word and try the second layer match*/
 	fe = ( lex_entry_t ) array_list_get( fmatch, x );
 	__idx__ = task->idx + fe->length;
-	read_next_word( task, &__idx__, task->buffer );
+	readNextWord( friso, task, &__idx__, task->buffer );
 
 	if ( task->bytes != 0 
-		&& utf8_cjk_string( get_utf8_unicode( task->buffer ) ) 
+		&& friso_cn_string( friso->charset, task ) 
 		&& friso_dic_match( friso->dic, 
 		    __LEX_CJK_WORDS__, task->buffer ) ) 
 	{
@@ -929,10 +946,10 @@ __STATIC_API__ lex_entry_t next_complex_cjk(
 		/*get the word and try the third layer match*/
 		se = ( lex_entry_t ) array_list_get( smatch, y );
 		__idx__ = task->idx + fe->length + se->length;
-		read_next_word( task, &__idx__, task->buffer );
+		readNextWord( friso, task, &__idx__, task->buffer );
 
 		if ( task->bytes != 0 
-			&& utf8_cjk_string( get_utf8_unicode( task->buffer ) )
+			&& friso_cn_string( friso->charset, task )
 			&& friso_dic_match( friso->dic, 
 			    __LEX_CJK_WORDS__, task->buffer ) ) 
 		{
@@ -945,13 +962,14 @@ __STATIC_API__ lex_entry_t next_complex_cjk(
 			array_list_add( words, fe );
 			array_list_add( words, se );
 			array_list_add( words, te );
-			array_list_add( chunks, 
-				new_chunk( words, 
+			array_list_add( chunks, new_chunk( words, 
 				    fe->length + se->length + te->length ) );
 		    }
 		    //free the third matched array list
 		    free_array_list( tmatch );
-		} else {
+		} 
+		else 
+		{
 		    words = new_array_list_with_opacity(2);
 		    array_list_add( words, fe );
 		    array_list_add( words, se );
@@ -962,7 +980,9 @@ __STATIC_API__ lex_entry_t next_complex_cjk(
 	    }
 	    //free the second match array list
 	    free_array_list( smatch );
-	} else {
+	} 
+	else 
+	{
 	    words = new_array_list_with_opacity(1);
 	    array_list_add( words, fe );
 	    array_list_add( chunks, new_chunk( words, fe->length ) );
@@ -1078,15 +1098,14 @@ FRISO_API friso_hits_t friso_next(
     while ( task->idx < task->length ) 
     {
 	//read the next word from the current position.
-	task->bytes = read_next_word( task, &task->idx, task->buffer );
+	task->bytes = readNextWord( friso, task, &task->idx, task->buffer );
 	if ( task->bytes == 0 ) break;
 
-	task->unicode = get_utf8_unicode( task->buffer );
-	if ( utf8_whitespace( task->unicode ) ) continue;	//clear whitespace.
+	if ( friso_whitespace( friso->charset, task) ) continue;	//clear whitespace.
 	task->hits->offset = task->idx - task->bytes;
 
 	/* {{{ CJK words recongnize block. */
-	if ( utf8_cjk_string( task->unicode ) ) 
+	if ( friso_cn_string( friso->charset, task ) ) 
 	{
 	    /* check the dictionary.
 	     * and return the unrecognized CJK char as a single word.
@@ -1126,7 +1145,7 @@ FRISO_API friso_hits_t friso_next(
 	     */
 	    if ( ( task->idx < task->length ) 
 		    && ((int)task->text[task->idx]) > 0 
-		    && utf8_en_letter( (uint_t)task->text[task->idx] ) )
+		    && friso_en_letter( friso->charset, task ) )
 	    {
 		//create a string buffer
 		sb = new_string_buffer_with_string(lex->word);
@@ -1213,8 +1232,8 @@ FRISO_API friso_hits_t friso_next(
 	/* }}} */
 
 	/* {{{ basic english/latin recongnize block. */
-	else if ( utf8_halfwidth_en_char( task->unicode ) 
-		|| utf8_fullwidth_en_char( task->unicode ) ) 
+	else if ( friso_halfwidth_en_char( friso->charset, task ) 
+		|| friso_fullwidth_en_char( friso->charset, task ) ) 
 	{
 	    /*
 	     * handle the english punctuation.
@@ -1230,7 +1249,7 @@ FRISO_API friso_hits_t friso_next(
 	     * 	except the keep punctuation(define in file friso_string.c) 
 	     * 	that will make up a word with the english chars around it.
 	     */
-	    if ( utf8_en_punctuation( task->unicode ) ) 
+	    if ( friso_en_punctuation( friso->charset, task ) ) 
 	    {
 		if ( config->clr_stw 
 			&& friso_dic_match(friso->dic, 
@@ -1282,7 +1301,7 @@ FRISO_API friso_hits_t friso_next(
 
 	/* {{{ Keep the chinese punctuation.
 	 * @added 2013-08-31) */
-	else if ( utf8_cn_punctuation( task->unicode ) )
+	else if ( friso_cn_punctuation( friso->charset, task ) )
 	{
 	    if ( config->clr_stw 
 		    && friso_dic_match(friso->dic, 
@@ -1294,16 +1313,16 @@ FRISO_API friso_hits_t friso_next(
 	    return task->hits;
 	}
 	/* }}} */
-	//else if ( utf8_letter_number( task->unicode ) ) 
+	//else if ( friso_letter_number( friso->charset, task ) ) 
 	//{
 	//} 
-	//else if ( utf8_other_number( task->unicode ) ) 
+	//else if ( friso_other_number( friso->charset, task ) ) 
 	//{
 	//}
 
 	/* {{{ keep the unrecognized words?
 	//@date 2013-10-14 */
-	else if ( config->keep_urec) 
+	else if ( config->keep_urec ) 
 	{
 	    memcpy(task->hits->word, task->buffer, task->bytes);
 	    task->hits->word[task->bytes] = '\0';
