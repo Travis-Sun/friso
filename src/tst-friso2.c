@@ -1,8 +1,11 @@
 /*
- * friso test program.
+ * Friso test program.
+ * 	Of couse you can make it a perfect demo for friso.
+ * all threads or proccess share the same friso_t,
+ * 	defferent threads/proccess use defferent friso_task_t.
+ * and you could share the friso_config_t if you wish...
  *
- * @author	chenxin
- * @email	chenxin619315@gmail.com
+ * @author chenxin <chenxin619315@gmail.com>
  */
 #include "friso_API.h"
 #include "friso.h"
@@ -11,12 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-/**
- * File Explain.
- * 
- * @author	chenxin<chenxin619315@gmail.com>
- */
 
 #define __LENGTH__ 15
 #define __INPUT_LENGTH__ 20480
@@ -75,12 +72,12 @@ int main(int argc, char **argv) {
 	    __path__ = argv[i+1];
 	}
     }
-    if ( __path__ == NULL ) {
+    if ( __path__ == NULL ) { 
 	// println("Usage: friso -init lexicon path");
 	exit(0);
     }
 
-    // s_time = clock();
+    //s_time = clock();
 
     //initialize
     friso = friso_new();
@@ -100,42 +97,42 @@ int main(int argc, char **argv) {
 
     // e_time = clock();
 
-    // printf("friso initialized in %fsec\n", (double) ( e_time - s_time ) / CLOCKS_PER_SEC );
+    // printf("Initialized in %fsec\n", (double) ( e_time - s_time ) / CLOCKS_PER_SEC );
+    // printf("+-Version: %s (%s)\n", friso_version(), friso->charset == FRISO_UTF8 ? "UTF-8" : "GBK" );
     // ___ABOUT___;
 
     //set the task.
     task = friso_new_task();
 
     while ( 1 ) {
-	//print("friso>> ");
-	//getLine( stdin, line );
-    fstring ret = getLine(stdin, line);
+	// print("friso>> ");
+	// getLine( stdin, line );
 	//exit the programe
-	//if ( strcasecmp( line, "" ) == 0 ) {
-    if ( ret == NULL ){
-	    //___EXIT_INFO___
-        break;
-	} else if ( strcasecmp(ret, "") == 0){
-        continue;
-    }
+	// if ( strcasecmp( line, "quit" ) == 0 ) {
+	//    ___EXIT_INFO___
+	// }
+    fstring ret = getLine(stdin, line);
+    if( ret == NULL) break;
+    else if ( strcasecmp(ret, "") == 0) continue;
 
 	//for ( i = 0; i < 1000000; i++ ) {
 	//set the task text.
 	friso_set_text( task, line );
-	//println("分词结果:");
+	// println("分词结果:");
 
-	//s_time = clock();
+	// s_time = clock();
 	while ( ( friso_next( friso, config, task ) ) != NULL ) {
 	    //printf("%s[%d]/ ", task->hits->word, task->hits->offset );
 	    printf("%s ", task->hits->word );
 	}
 	//}
-	//e_time = clock();
-	//printf("\nDone, cost < %fsec\n", ( (double)(e_time - s_time) ) / CLOCKS_PER_SEC );
+	// e_time = clock();
+	// printf("\nDone, cost < %fsec\n", ( (double)(e_time - s_time) ) / CLOCKS_PER_SEC );
 
     }
 
     friso_free_task( task );
+    printf("\n");
 
     //error block.
 err:
